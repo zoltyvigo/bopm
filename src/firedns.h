@@ -23,24 +23,12 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #ifndef _FIREDNS_H
 #define _FIREDNS_H
 
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-
-#ifndef AF_INET6
-struct in6_addr {
-   unsigned char   s6_addr[16];
-};
-#endif
-
 /* max number of nameservers used */
 #define FDNS_MAX              8
 /* preferred firedns config file */
-#define FDNS_CONFIG_PREF     BOPM_ETCDIR "/firedns.conf"
+#define FDNS_CONFIG_PREF     HOPM_ETCDIR "/firedns.conf"
 /* fallback config file */
 #define FDNS_CONFIG_FBCK     "/etc/resolv.conf"
-/* Number of seconds to wait for a reply */
-#define FDNS_TIMEOUT         5
 /* DNS well known port */
 #define FDNS_PORT            53
 /* name to IPv4 address */
@@ -73,27 +61,26 @@ struct in6_addr {
 #define FDNS_ERR_OTHER       9
 
 /* Used with the above error values */
-extern int fdns_errno;
-extern unsigned int fdns_fdinuse;
+extern int firedns_errno;
 
-void firedns_init(void);
-
-struct firedns_result {
-   char text[1024];
-   char lookup[256];
-   void *info;
+struct firedns_result
+{
+  char text[1024];
+  char lookup[256];
+  void *info;
 };
 
 /* non-blocking functions */
-int firedns_getip(int type, const char * const name, void *info);
-struct firedns_result *firedns_getresult(const int fd);
+extern int firedns_getip(int, const char *const, void *);
+extern struct firedns_result *firedns_getresult(const int);
 
 /* low-timeout blocking functions */
-char *firedns_resolveip(int type, const char * const name);
-struct in_addr *firedns_resolveip4(const char * const name);
-struct in6_addr *firedns_resolveip6(const char * const name);
+extern void *firedns_resolveip(int, const char *const);
+extern struct in_addr *firedns_resolveip4(const char *const);
+extern struct in6_addr *firedns_resolveip6(const char *const);
 
-void firedns_cycle(void);
-char *firedns_strerror(int);
+extern void firedns_init(void);
+extern void firedns_cycle(void);
+extern const char *firedns_strerror(int);
 
 #endif

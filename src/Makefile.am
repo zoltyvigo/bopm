@@ -1,14 +1,46 @@
-SUBDIRS = libopm .
+SUBDIRS = libopm
+bin_PROGRAMS = hopm
 
-bin_PROGRAMS = bopm
-
-AM_CPPFLAGS = -DBOPM_ETCDIR="\"$(sysconfdir)\"" -DBOPM_LOGDIR="\"$(localstatedir)\""
+AM_CPPFLAGS = -DHOPM_PREFIX="\"$(prefix)\"" -DHOPM_ETCDIR="\"$(sysconfdir)\"" -DHOPM_LOGDIR="\"$(localstatedir)/log\""
 AM_YFLAGS = -d
 
-bopm_SOURCES = compat.c compat.h config-parser.y config-lexer.l config.c config.h \
-    dnsbl.c dnsbl.h extern.h inet.c inet.h irc.c irc.h log.c log.h main.c match.c \
-    match.h misc.c misc.h malloc.c malloc.h list.c list.h negcache.c negcache.h \
-    opercmd.c opercmd.h options.h scan.c scan.h setup.h stats.c stats.h firedns.c \
-	 firedns.h main.h defs.h
+hopm_SOURCES = compat.c        \
+               compat.h        \
+               config-parser.y \
+               config-lexer.l  \
+               config.c        \
+               config.h        \
+               dnsbl.c         \
+               dnsbl.h         \
+               extern.h        \
+               firedns.c       \
+               firedns.h       \
+               irc.c           \
+               irc.h           \
+               list.c          \
+               list.h          \
+               log.c           \
+               log.h           \
+               main.c          \
+               main.h          \
+               memory.c        \
+               memory.h        \
+               match.c         \
+               match.h         \
+               misc.c          \
+               misc.h          \
+               negcache.c      \
+               negcache.h      \
+               opercmd.c       \
+               opercmd.h       \
+               options.h       \
+               patchlevel.h    \
+               patricia.c      \
+               patricia.h      \
+               scan.c          \
+               scan.h          \
+               serno.h         \
+               stats.c         \
+               stats.h
 
-bopm_LDADD = libopm/src/.libs/libopm.a @ETR_SOCKET_LIBS@ @LIBOBJS@
+hopm_LDADD = libopm/src/.libs/libopm.a @LIBOBJS@

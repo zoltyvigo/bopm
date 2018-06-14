@@ -1,172 +1,96 @@
-/* vim: set shiftwidth=3 softtabstop=3 expandtab: */
-
 /*
-Copyright (C) 2002  Erik Fears
- 
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; either version 2
-of the License, or (at your option) any later version.
- 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
- 
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
- 
-      Foundation, Inc.
-      59 Temple Place - Suite 330
-      Boston, MA  02111-1307, USA.
- 
-*/
+ *  Copyright (c) 2002 Erik Fears
+ *  Copyright (c) 2014-2017 ircd-hybrid development team
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301
+ *  USA
+ */
 
 #include "setup.h"
 
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 
-#ifdef STDC_HEADERS
-# include <string.h>
-#endif
-
-#include "compat.h"
-#include "config.h"
-#include "extern.h"
 #include "misc.h"
 
+
+const char *
+date_iso8601(time_t lclock)
+{
+  static char buf[32];
+  static time_t lclock_last;
+
+  if (!lclock)
+    lclock = time(0);
+
+  if (lclock_last != lclock)
+  {
+    lclock_last = lclock;
+    strftime(buf, sizeof(buf), "%FT%T%z", localtime(&lclock));
+  }
+
+  return buf;
+}
 
 /*
  * Split a time_t into an English-language explanation of how
  * much time it represents, e.g. "2 hours 45 minutes 8 seconds"
  */
-char *dissect_time(time_t time)
+const char *
+time_dissect(time_t duration)
 {
-   static char buf[64];
-   unsigned int years, weeks, days, hours, minutes, seconds;
+  static char buf[32];  /* 32 = sizeof("9999999999999999 days, 23:59:59") */
+  unsigned int days = 0, hours = 0, minutes = 0, seconds = 0;
 
-   years = weeks = days = hours = minutes = seconds = 0;
+  while (duration >= 60 * 60 * 24)
+  {
+    duration -= 60 * 60 * 24;
+    ++days;
+  }
 
-   while (time >= 60 * 60 * 24 * 365)
-   {
-      time -= 60 * 60 * 24 * 365;
-      years++;
-   }
+  while (duration >= 60 * 60)
+  {
+    duration -= 60 * 60;
+    ++hours;
+  }
 
-   while (time >= 60 * 60 * 24 * 7)
-   {
-      time -= 60 * 60 * 24 * 7;
-      weeks++;
-   }
+  while (duration >= 60)
+  {
+    duration -= 60;
+    ++minutes;
+  }
 
-   while (time >= 60 * 60 * 24)
-   {
-      time -= 60 * 60 * 24;
-      days++;
-   }
+  seconds = duration;
 
-   while (time >= 60 * 60)
-   {
-      time -= 60 * 60;
-      hours++;
-   }
-
-   while (time >= 60)
-   {
-      time -= 60;
-      minutes++;
-   }
-
-   seconds = time;
-
-   if (years)
-   {
-      snprintf(buf, sizeof(buf),
-               "%d year%s, %d week%s, %d day%s, %02d:%02d:%02d",
-               years, years == 1 ? "" : "s", weeks,
-               weeks == 1 ? "" : "s", days, days == 1 ? "" : "s",
-               hours, minutes, seconds);
-   }
-   else if (weeks)
-   {
-      snprintf(buf, sizeof(buf),
-               "%d week%s, %d day%s, %02d:%02d:%02d", weeks,
-               weeks == 1 ? "" : "s", days, days == 1 ? "" : "s",
-               hours, minutes, seconds);
-   }
-   else if (days)
-   {
-      snprintf(buf, sizeof(buf), "%d day%s, %02d:%02d:%02d",
-               days, days == 1 ? "" : "s", hours, minutes, seconds);
-   }
-   else if (hours)
-   {
-      if (minutes || seconds)
-      {
-         snprintf(buf, sizeof(buf),
-                  "%d hour%s, %d minute%s, %d second%s", hours,
-                  hours == 1 ? "" : "s", minutes,
-                  minutes == 1 ? "" : "s", seconds,
-                  seconds == 1 ? "" : "s");
-      }
-      else
-      {
-         snprintf(buf, sizeof(buf), "%d hour%s", hours,
-                  hours == 1 ? "" : "s");
-      }
-   }
-   else if (minutes)
-   {
-      snprintf(buf, sizeof(buf), "%d minute%s, %d second%s",
-               minutes, minutes == 1 ? "" : "s", seconds,
-               seconds == 1 ? "" : "s");
-   }
-   else
-   {
-      snprintf(buf, sizeof(buf), "%d second%s", seconds,
-               seconds == 1 ? "" : "s");
-   }
-
-   return(buf);
+  snprintf(buf, sizeof(buf), "%u day%s, %02u:%02u:%02u",
+           days, days == 1 ? "" : "s", hours, minutes, seconds);
+  return buf;
 }
 
-/*
- * Strip leading/tailing characters from null terminated str and return a
- * pointer to the new string.
- */
-
-char *clean(char *str)
+const char *
+stripws(char *txt)
 {
-   size_t i;
-   /* Position of last non space. */
-   int ln;
-   /* Position of first non space. */
-   int fn;
-   int gf;
+  while (*txt == '\t' || *txt == ' ')
+    ++txt;
 
-   ln = 0;
-   fn = 0;
-   gf = 0;
+  char *tmp = txt + strlen(txt) - 1;
+  while (tmp >= txt && (*tmp == '\t' || *tmp == ' '))
+    --tmp;
 
-   /* Dont need to deal with 1 character */
-   if (strlen(str) <= 1)
-      return str;
+  *(tmp + 1) = '\0';
 
-   for (i = 0; i < strlen(str); i++)
-   {
-      if (fn == 0 && str[i] != ' ' && !gf)
-      {
-         fn = i;
-         gf = 1;
-      }
-      if (str[i] != ' ')
-         ln = i;
-   }
-
-   /* Null terminate before the tailing spaces. */
-   str[ln + 1] = 0;
-
-   /* Return pointer to point after leading spaces. */
-   return(str + (fn));
+  return txt;
 }

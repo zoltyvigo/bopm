@@ -1,0 +1,25 @@
+# $Id$
+
+language: c
+
+os:
+  - linux
+  - osx
+
+compiler:
+ - gcc
+ - clang
+
+script:
+ - if [ "$TRAVIS_OS_NAME" = "osx" ] && [ "$CC" = "gcc" ]; then export CC=$(ls -t /usr/local/bin/gcc-?.*); fi
+ - ./configure
+ - make
+ - sudo make install
+
+notifications:
+ email:
+  - bugs@ircd-hybrid.org
+ irc:
+  channels:
+  - "irc.ircd-hybrid.org#ircd-coders"
+  skip_join: true

@@ -1,160 +1,122 @@
-/* vim: set shiftwidth=3 softtabstop=3 expandtab: */ 
-
 /*
- * Copyright (C) 2002  Erik Fears
+ *  Copyright (c) 2002 Erik Fears
+ *  Copyright (c) 2014-2017 ircd-hybrid development team
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to
- *
- *       The Free Software Foundation, Inc.
- *       59 Temple Place - Suite 330
- *       Boston, MA  02111-1307, USA.
- *
- *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301
+ *  USA
  */
 
 #include "setup.h"
 
 #include <stdio.h>
-#include <unistd.h>
-#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <netinet/in.h>
 
-#ifdef STDC_HEADERS
-# include <stdlib.h>
-# include <string.h>
-#endif
-
-#ifdef TIME_WITH_SYS_TIME
-# include <sys/time.h>
-# include <time.h>
-#else
-# ifdef HAVE_SYS_TIME_H
-#  include <sys/time.h>
-# else
-#  include <time.h>
-# endif
-#endif
-
-#include <errno.h>
-#include <fcntl.h>
-
-#ifdef HAVE_SYS_POLL_H
-# include <sys/poll.h>
-#endif
-
-#include "inet.h"
 #include "compat.h"
 #include "config.h"
 #include "irc.h"
 #include "log.h"
-#include "opercmd.h"
 #include "stats.h"
 #include "dnsbl.h"
-#include "extern.h"
 #include "options.h"
 #include "negcache.h"
-#include "malloc.h"
+#include "main.h"
+#include "memory.h"
 #include "match.h"
+#include "misc.h"
 #include "scan.h"
 
-/* Libopm */
-
+/* libopm includes */
 #include "libopm/src/opm.h"
 #include "libopm/src/opm_common.h"
 #include "libopm/src/opm_error.h"
 #include "libopm/src/opm_types.h"
 
 
-/* GLOBAL LISTS */
-
-static list_t *SCANNERS = NULL;   /* List of OPM_T */
-static list_t *MASKS    = NULL;   /* Associative list of masks->scanners */
-
-
-/* Negative Cache */
-struct cnode *nc_head;
-
+/* GLOBAL LIST */
+static list_t SCANNERS;  /* List of OPM_T */
 
 /* Function declarations */
-
-struct scan_struct *scan_create(char **, char *);
-void scan_free(struct scan_struct *);
-static void scan_irckline(struct scan_struct *, char *, char *);
-static void scan_negative(struct scan_struct *);
+static struct scan_struct *scan_create(const char *[], const char *);
+static void scan_free(struct scan_struct *);
+static void scan_irckline(const struct scan_struct *, const char *, const char *);
+static void scan_negative(const struct scan_struct *);
 static void scan_log(OPM_REMOTE_T *);
 
 /** Callbacks for LIBOPM */
-void scan_open_proxy(OPM_T *, OPM_REMOTE_T *, int, void *);
-void scan_negotiation_failed(OPM_T *, OPM_REMOTE_T *, int, void *);
+static void scan_open_proxy(OPM_T *, OPM_REMOTE_T *, int, void *);
+static void scan_negotiation_failed(OPM_T *, OPM_REMOTE_T *, int, void *);
 static void scan_timeout(OPM_T *, OPM_REMOTE_T *, int, void *);
 static void scan_end(OPM_T *, OPM_REMOTE_T *, int, void *);
 static void scan_handle_error(OPM_T *, OPM_REMOTE_T *, int, void *);
 
 extern FILE *scanlogfile;
 
+
 /* scan_cycle
  *
  *    Perform scanner tasks.
  */
-
-void scan_cycle()
+void
+scan_cycle(void)
 {
-   node_t *p;
-   struct scanner_struct *scs;
+  node_t *node;
 
-   /* Cycle through the blacklist first.. */
-   dnsbl_cycle();
+  /* Cycle through the blacklist first.. */
+  dnsbl_cycle();
 
-   /* Cycle each scanner object */
-   LIST_FOREACH(p, SCANNERS->head)
-   {
-      scs = (struct scanner_struct *) p->data;
-      opm_cycle(scs->scanner);
-   }
+  /* Cycle each scanner object */
+  LIST_FOREACH(node, SCANNERS.head)
+  {
+    struct scanner_struct *scs = node->data;
+    opm_cycle(scs->scanner);
+  }
 }
 
-
-
-
 /* scan_timer
- *   
+ *
  *    Perform actions that are to be performed every ~1 second.
  *
  * Parameters: NONE
  * Return: NONE
  *
  */
-void scan_timer(void)
+void
+scan_timer(void)
 {
-   static int nc_counter;
+  static time_t nc_counter;
 
-   if (OptionsItem->negcache > 0)
-   {
-      if (nc_counter++ >= NEG_CACHE_REBUILD)
-      {
-         /*
-          * Time to rebuild the negative
-          * cache.
-          */
-         if(OPT_DEBUG)
-            log_printf("SCAN -> Rebuilding negative cache");
+  if (OptionsItem->negcache)
+  {
+    if (nc_counter++ >= OptionsItem->negcache_rebuild)
+    {
+      /*
+       * Time to rebuild the negative cache.
+       */
+      if (OPT_DEBUG)
+        log_printf("SCAN -> Rebuilding negative cache");
 
-         negcache_rebuild();
-         nc_counter = 0;
-      }
-   }
+      negcache_rebuild();
+      nc_counter = 0;
+    }
+  }
 }
-
 
 /* scan_gettype(int protocol)
  *
@@ -168,29 +130,57 @@ void scan_timer(void)
  *    name
  *
  */
-
-char *scan_gettype(int protocol)
+const char *
+scan_gettype(int protocol)
 {
-   unsigned int i;
-   static char *undef = "undefined";
+  static const char *const undef = "undefined";
+  static const struct protocol_assoc protocols[] =
+  {
+    { .type = OPM_TYPE_HTTP,      .name = "HTTP"      },
+    { .type = OPM_TYPE_HTTPPOST,  .name = "HTTPPOST"  },
+    { .type = OPM_TYPE_SOCKS4,    .name = "SOCKS4"    },
+    { .type = OPM_TYPE_SOCKS5,    .name = "SOCKS5"    },
+    { .type = OPM_TYPE_WINGATE,   .name = "WINGATE"   },
+    { .type = OPM_TYPE_ROUTER,    .name = "ROUTER"    },
+    { .type = OPM_TYPE_HTTPS,     .name = "HTTPS"     },
+    { .type = OPM_TYPE_HTTPSPOST, .name = "HTTPSPOST" },
+    { .type = OPM_TYPE_DREAMBOX,  .name = "DREAMBOX"  },
+    { .type = 0 }
+  };
 
-   static struct protocol_assoc protocols[] =
-      {
-         { OPM_TYPE_HTTP,     "HTTP"     },
-         { OPM_TYPE_HTTPPOST, "HTTPPOST" },
-         { OPM_TYPE_SOCKS4,   "SOCKS4"   },
-         { OPM_TYPE_SOCKS5,   "SOCKS5"   },
-         { OPM_TYPE_WINGATE,  "WINGATE"  },
-         { OPM_TYPE_ROUTER,   "ROUTER"   }
-      };
+  for (const struct protocol_assoc *tab = protocols; tab->type; ++tab)
+    if (protocol == tab->type)
+      return tab->name;
 
-   for(i = 0; i < (sizeof(protocols) / sizeof(struct protocol_assoc)); i++)
-      if(protocol == protocols[i].type)
-         return protocols[i].name;
-
-   return undef;
+  return undef;
 }
 
+/* scan_checkexempt
+ *
+ *    Check mask against exempt list.
+ *
+ * Parameters:
+ *     mask: Mask to check
+ *
+ * Return:
+ *     1 if mask is in list
+ *     0 if mask is not in list
+ */
+static int
+scan_checkexempt(const char *mask, const char *ipmask)
+{
+  node_t *node;
+
+  LIST_FOREACH(node, ExemptItem->masks->head)
+  {
+    const char *exempt_mask = node->data;
+
+    if (!match(exempt_mask, mask) || !match(exempt_mask, ipmask))
+      return 1;
+  }
+
+  return 0;
+}
 
 /* scan_init
 
@@ -198,127 +188,108 @@ char *scan_gettype(int protocol)
 
    Parameters:
       None
-   
+
    Return:
       None
 */
-
-void scan_init()
+void
+scan_init(void)
 {
-   node_t *p, *p2, *p3, *p4, *node;
+  node_t *p, *p2, *p3, *p4, *node;
 
-   struct UserConf *uc;
-   struct ScannerConf *sc;
-   struct ProtocolConf *pc;
-   struct scanner_struct *scs;
+  /* Setup each individual scanner */
+  LIST_FOREACH(p, ScannerItemList->head)
+  {
+    struct ScannerConf *sc = p->data;
 
-   char *mask;
-   char *scannername;
+    if (OPT_DEBUG)
+      log_printf("SCAN -> Setting up scanner [%s]", sc->name);
 
-   /* FIXME: If rehash code is ever added, cleanup would need done here. */
+    /* Build the scanner */
+    struct scanner_struct *scs = xcalloc(sizeof(*scs));
+    scs->scanner = opm_create();
+    scs->name = xstrdup(sc->name);
+    scs->masks = list_create();
 
-   SCANNERS = list_create();
-   MASKS    = list_create();
+    /* Setup configuration */
+    opm_config(scs->scanner, OPM_CONFIG_FD_LIMIT, &sc->fd);
+    opm_config(scs->scanner, OPM_CONFIG_SCAN_IP, sc->target_ip);
+    opm_config(scs->scanner, OPM_CONFIG_SCAN_PORT, &sc->target_port);
+    opm_config(scs->scanner, OPM_CONFIG_TIMEOUT, &sc->timeout);
+    opm_config(scs->scanner, OPM_CONFIG_MAX_READ, &sc->max_read);
+    opm_config(scs->scanner, OPM_CONFIG_BIND_IP, sc->vhost);
 
-   /* Setup each individual scanner */
-   LIST_FOREACH(p, ScannerItemList->head)
-   {
-      sc = p->data;
-      scs = MyMalloc(sizeof *scs);
+    /* add target strings */
+    LIST_FOREACH(p2, sc->target_string->head)
+      opm_config(scs->scanner, OPM_CONFIG_TARGET_STRING, p2->data);
 
-      if(OPT_DEBUG)
-         log_printf("SCAN -> Setting up scanner [%s]", sc->name);
+    /* Setup callbacks */
+    opm_callback(scs->scanner, OPM_CALLBACK_OPENPROXY, &scan_open_proxy, scs);
+    opm_callback(scs->scanner, OPM_CALLBACK_NEGFAIL, &scan_negotiation_failed, scs);
+    opm_callback(scs->scanner, OPM_CALLBACK_TIMEOUT, &scan_timeout, scs);
+    opm_callback(scs->scanner, OPM_CALLBACK_END, &scan_end, scs);
+    opm_callback(scs->scanner, OPM_CALLBACK_ERROR, &scan_handle_error, scs);
 
-      /* Build the scanner */
-      scs->scanner = opm_create();
-      scs->name = (char *) DupString(sc->name);
-      scs->masks = list_create();
+    /* Setup the protocols */
+    LIST_FOREACH(p2, sc->protocols->head)
+    {
+      struct ProtocolConf *pc = p2->data;
 
-      /* Setup configuration */
-      opm_config(scs->scanner, OPM_CONFIG_FD_LIMIT, &(sc->fd));
-      opm_config(scs->scanner, OPM_CONFIG_SCAN_IP, sc->target_ip);
-      opm_config(scs->scanner, OPM_CONFIG_SCAN_PORT, &(sc->target_port));
-      opm_config(scs->scanner, OPM_CONFIG_TIMEOUT, &(sc->timeout));
-      opm_config(scs->scanner, OPM_CONFIG_MAX_READ, &(sc->max_read));
-      opm_config(scs->scanner, OPM_CONFIG_BIND_IP, sc->vhost);
+      if (OPT_DEBUG >= 2)
+        log_printf("SCAN -> Adding protocol %s:%d to scanner [%s]",
+                   scan_gettype(pc->type), pc->port, scs->name);
 
-      /* add target strings */
-      LIST_FOREACH(p2, sc->target_string->head)
-      opm_config(scs->scanner, OPM_CONFIG_TARGET_STRING, (char *) p2->data);
+      if (opm_addtype(scs->scanner, pc->type, pc->port) == OPM_ERR_BADPROTOCOL)
+        log_printf("SCAN -> Error bad protocol %s:%d in scanner [%s]",
+                    scan_gettype(pc->type), pc->port, scs->name);
+    }
 
-      /* Setup callbacks */
-      opm_callback(scs->scanner, OPM_CALLBACK_OPENPROXY, &scan_open_proxy, scs);
-      opm_callback(scs->scanner, OPM_CALLBACK_NEGFAIL, &scan_negotiation_failed, scs);
-      opm_callback(scs->scanner, OPM_CALLBACK_TIMEOUT, &scan_timeout, scs);
-      opm_callback(scs->scanner, OPM_CALLBACK_END, &scan_end, scs);
-      opm_callback(scs->scanner, OPM_CALLBACK_ERROR, &scan_handle_error, scs);
+    node = node_create(scs);
+    list_add(&SCANNERS, node);
+  }
 
+  /* Give scanners a list of masks they scan */
+  LIST_FOREACH(p, SCANNERS.head)
+  {
+    struct scanner_struct *scs = p->data;
 
-      /* Setup the protocols */
-      LIST_FOREACH(p2, sc->protocols->head)
+    LIST_FOREACH(p2, UserItemList->head)
+    {
+      struct UserConf *uc = p2->data;
+
+      LIST_FOREACH(p3, uc->scanners->head)
       {
-         pc = (struct ProtocolConf *) p2->data;
+        const char *scannername = p3->data;
 
-         if(OPT_DEBUG >= 2)
-         {
-            log_printf("SCAN -> Adding protocol %s:%d to scanner [%s]",
-                  scan_gettype(pc->type), pc->port, scs->name);
-         }
+        /* Add all these masks to scanner */
+        if (strcasecmp(scannername, scs->name) == 0)
+        {
+          LIST_FOREACH(p4, uc->masks->head)
+          {
+            const char *mask = p4->data;
 
-         if(opm_addtype(scs->scanner, pc->type, pc->port) == OPM_ERR_BADPROTOCOL)
-         {
-            log_printf("SCAN -> Error bad protocol %s:%d in scanner [%s]",
-                  scan_gettype(pc->type), pc->port, scs->name);
-         }
+            if (OPT_DEBUG)
+              log_printf("SCAN -> Linking the mask [%s] to scanner [%s]", mask, scannername);
+
+            node = node_create(xstrdup(mask));
+            list_add(scs->masks, node);
+          }
+
+          break;
+        }
       }
+    }
+  }
 
-      node = node_create(scs);
-      list_add(SCANNERS, node);
-   }
+  /* Initialise negative cache */
+  if (OptionsItem->negcache)
+  {
+    if (OPT_DEBUG >= 2)
+      log_printf("SCAN -> Initializing negative cache");
 
-
-   /* Give scanners a list of masks they scan */
-   LIST_FOREACH(p, SCANNERS->head)
-   {
-      scs = (struct scanner_struct *) p->data;
-
-      LIST_FOREACH(p2, UserItemList->head)
-      {
-         uc = (struct UserConf *) p2->data;
-         LIST_FOREACH(p3, uc->scanners->head)
-         {
-            scannername = (char *) p3->data;
-            /* Add all these masks to scanner */
-            if(strcasecmp(scannername, scs->name) == 0)
-            {
-               LIST_FOREACH(p4, uc->masks->head)
-               {
-                  mask = (char *) p4->data;
-
-                  if(OPT_DEBUG)
-                  {
-                     log_printf("SCAN -> Linking the mask [%s] to scanner "
-                           "[%s]", mask, scannername);
-                  }
-
-                  node = node_create(DupString(mask));
-                  list_add(scs->masks, node);
-               }
-               break;
-            }
-         }
-      }
-   }
-
-   /* Initialise negative cache */
-   if (OptionsItem->negcache > 0)
-   {
-      if(OPT_DEBUG >= 2)
-         log_printf("SCAN -> Initializing negative cache");
-      nc_init(&nc_head);
-   }
+    negcache_init();
+  }
 }
-
 
 /* scan_connect
  *
@@ -335,124 +306,98 @@ void scan_init()
  * Return: NONE
  *
  */
-
-void scan_connect(char **user, char *msg)
+void
+scan_connect(const char *user[], const char *msg)
 {
+  node_t *p, *p2;
+  int ret;
 
-   struct bopm_sockaddr ip;
+  /*
+   * Have to use MSGLENMAX here because it is unknown what the max size of
+   * username/hostname can be.  Some ircds use really mad values for
+   * these.
+   */
+  char hostmask[MSGLENMAX];
+  char addrmask[MSGLENMAX];
 
-   node_t *p, *p2;
-   struct scan_struct *ss;
-   struct scanner_struct *scs;
-   char *scsmask;
-   int ret;
+  /* Check negcache before anything */
+  if (negcache_check(user[3]))
+  {
+    if (OPT_DEBUG)
+      log_printf("SCAN -> %s!%s@%s [%s] is negatively cached. Skipping all tests.",
+                 user[0], user[1], user[2], user[3]);
+    return;
+  }
 
-   /*
-    * Have to use MSGLENMAX here because it is unknown what the max size of
-    * username/hostname can be.  Some ircds use really mad values for
-    * these.
-    */
-   static char mask[MSGLENMAX];
-   static char ipmask[MSGLENMAX];
+  /* Generate user mask */
+  snprintf(hostmask, sizeof(hostmask), "%s!%s@%s", user[0], user[1], user[2]);
+  snprintf(addrmask, sizeof(addrmask), "%s!%s@%s", user[0], user[1], user[3]);
 
-   /* Check negcache before anything */
-   if(OptionsItem->negcache > 0)
-   {
-      if (!inet_pton(AF_INET, user[3], &(ip.sa4.sin_addr)))
+  /* Check exempt list now that we have a mask */
+  if (scan_checkexempt(hostmask, addrmask))
+  {
+    if (OPT_DEBUG)
+      log_printf("SCAN -> %s [%s] is exempt from scanning", hostmask, user[3]);
+
+    return;
+  }
+
+  /* Create scan_struct */
+  struct scan_struct *ss = scan_create(user, msg);
+
+  /* Store ss in the remote struct, so that in callbacks we have ss */
+  ss->remote->data = ss;
+
+  /* Start checking our DNSBLs */
+  if (LIST_SIZE(OpmItem->blacklists))
+    dnsbl_add(ss);
+
+  /* Add ss->remote to all matching scanners */
+  LIST_FOREACH(p, SCANNERS.head)
+  {
+    struct scanner_struct *scs = p->data;
+
+    LIST_FOREACH(p2, scs->masks->head)
+    {
+      const char *scsmask = p2->data;
+
+      if (!match(scsmask, hostmask))
       {
-         log_printf("SCAN -> Invalid IPv4 address '%s'!", user[3]);
-         return;
+        if (OPT_DEBUG)
+          log_printf("SCAN -> Passing %s to scanner [%s]", hostmask, scs->name);
+
+        if ((ret = opm_scan(scs->scanner, ss->remote)) != OPM_SUCCESS)
+        {
+          switch (ret)
+          {
+            case OPM_ERR_NOPROTOCOLS:
+              continue;
+              break;
+            case OPM_ERR_BADADDR:
+              if (!strchr(ss->ip, ':'))  /* XXX: hack alert. remove when libopm can deal with IPv6 addresses */
+                log_printf("OPM -> Bad address %s [%s]", ss->ip, scs->name);
+              break;
+            default:
+              log_printf("OPM -> Unknown error %s [%s]", ss->ip, scs->name);
+              break;
+          }
+        }
+        else
+          ++ss->scans;  /* Increase scan count only if OPM_SUCCESS */
+
+        break;  /* Continue to next scanner */
       }
-      else
-      {
-         if(check_neg_cache(ip.sa4.sin_addr.s_addr) != NULL)
-         {
-            if(OPT_DEBUG)
-            {
-               log_printf("SCAN -> %s!%s@%s (%s) is negatively cached. "
-                     "Skipping all tests.", user[0], user[1], user[2],
-                     user[3]);
-            }
-            return;
-         }
-      }
-   }
+    }
+  }
 
-   /* Generate user mask */
-   snprintf(mask, MSGLENMAX, "%s!%s@%s", user[0], user[1], user[2]);
-   snprintf(ipmask, MSGLENMAX, "%s!%s@%s", user[0], user[1], user[3]);
-
-   /* Check exempt list now that we have a mask */
-   if(scan_checkexempt(mask, ipmask))
-   {
-      if(OPT_DEBUG)
-         log_printf("SCAN -> %s is exempt from scanning", mask);
-      return;
-   }
-
-   /* create scan_struct */
-   ss = scan_create(user, msg);
-
-   /* Store ss in the remote struct, so that in callbacks we have ss */
-   ss->remote->data = ss;
-
-   /* Start checking our DNSBLs */
-   if(LIST_SIZE(OpmItem->blacklists) > 0)
-      dnsbl_add(ss);
-
-   /* Add ss->remote to all matching scanners */
-   LIST_FOREACH(p, SCANNERS->head)
-   {
-      scs = (struct scanner_struct *) p->data;
-      LIST_FOREACH(p2, scs->masks->head)
-      {
-         scsmask = (char *) p2->data;
-         if(match(scsmask, mask))
-         {
-            if(OPT_DEBUG)
-            {
-               log_printf("SCAN -> Passing %s to scanner [%s]", mask,
-                     scs->name);
-            }
-
-            if((ret = opm_scan(scs->scanner, ss->remote)) != OPM_SUCCESS)
-            {
-               switch(ret)
-               {
-                  case OPM_ERR_NOPROTOCOLS:
-                     continue;
-                     break;
-                  case OPM_ERR_BADADDR:
-                     log_printf("OPM -> Bad address %s [%s].",
-                           (ss->manual_target ? ss->manual_target->name :
-                           "(unknown)"), ss->ip);
-                     break;
-                  default:
-                     log_printf("OPM -> Unknown error %s [%s].",
-                           (ss->manual_target ? ss->manual_target->name :
-                           "(unknown)"), ss->ip);
-                     break;
-               }
-            }
-            else
-               ss->scans++; /* Increase scan count only if OPM_SUCCESS */
-
-            break; /* Continue to next scanner */
-         }
-      }
-   }
-
-   /* All scanners returned !OPM_SUCCESS and there were no dnsbl checks */
-   if(ss->scans == 0)
-      scan_free(ss);
+  /* All scanners returned !OPM_SUCCESS and there were no dnsbl checks */
+  if (ss->scans == 0)
+    scan_free(ss);
 }
-
-
-
 
 /* scan_create
  *
- *    Allocate scan struct, including user information and REMOTE 
+ *    Allocate scan struct, including user information and REMOTE
  *    for LIBOPM.
  *
  * Parameters:
@@ -466,31 +411,20 @@ void scan_connect(char **user, char *msg)
  * Return: Pointer to new scan_struct
  *
  */
-
-struct scan_struct *scan_create(char **user, char *msg)
+static struct scan_struct *
+scan_create(const char *user[], const char *msg)
 {
-   struct scan_struct *ss;
+  struct scan_struct *ss = xcalloc(sizeof(*ss));
 
-   ss = MyMalloc(sizeof *ss);
+  ss->irc_nick = xstrdup(user[0]);
+  ss->irc_username = xstrdup(user[1]);
+  ss->irc_hostname = xstrdup(user[2]);
+  ss->ip = xstrdup(user[3]);
+  ss->proof = xstrdup(msg);
+  ss->remote = opm_remote_create(ss->ip);
 
-   ss->irc_nick = (char *) DupString(user[0]);
-   ss->irc_username = (char *) DupString(user[1]);
-   ss->irc_hostname = (char *) DupString(user[2]);
-   ss->ip = (char *) DupString(user[3]);
-   ss->proof = (char *) DupString(msg);
-
-   ss->remote = opm_remote_create(ss->ip);
-   ss->scans = 0;
-   ss->positive = 0;
-
-   ss->manual_target = NULL;
-
-   assert(ss->remote);
-   return ss;
+  return ss;
 }
-
-
-
 
 /* scan_free
  *
@@ -499,64 +433,50 @@ struct scan_struct *scan_create(char **user, char *msg)
  *
  * Parameters:
  *    ss: scan_struct to free
- * 
- * Return: NONE
  *
+ * Return: NONE
  */
-
-void scan_free(struct scan_struct *ss)
+static void
+scan_free(struct scan_struct *ss)
 {
-   if(ss == NULL)
-      return;
+  xfree(ss->irc_nick);
+  xfree(ss->irc_username);
+  xfree(ss->irc_hostname);
+  xfree(ss->ip);
+  xfree(ss->proof);
 
-   MyFree(ss->irc_nick);
-   MyFree(ss->irc_username);
-   MyFree(ss->irc_hostname);
-   MyFree(ss->ip);
-   MyFree(ss->proof);
-
-   opm_remote_free(ss->remote);
-   MyFree(ss);
+  opm_remote_free(ss->remote);
+  xfree(ss);
 }
-
-
 
 /* scan_checkfinished
  *
  *   Check if a scan is complete (ss->scans <= 0)
  *   and free it if need be.
- *
  */
-
-void scan_checkfinished(struct scan_struct *ss)
+void
+scan_checkfinished(struct scan_struct *ss)
 {
-   if(ss->scans <= 0)
-   {
+  if (ss->scans <= 0)
+  {
+    if (ss->manual_target)
+      irc_send("PRIVMSG %s :CHECK -> All tests on %s completed.",
+               ss->manual_target, ss->ip);
+    else
+    {
+      if (OPT_DEBUG)
+        /* If there was a manual_target, then irc_nick, etc is NULL. */
+        log_printf("SCAN -> All tests on %s!%s@%s [%s] complete.",
+                   ss->irc_nick, ss->irc_username, ss->irc_hostname, ss->ip);
 
-      if(ss->manual_target != NULL)
-      {
-         irc_send("PRIVMSG %s :CHECK -> All tests on %s completed.",
-               ss->manual_target->name, ss->ip);
-      }
-      else
-      {
-         if(OPT_DEBUG)
-         {
-            /* If there was a manual_target, then irc_nick, etc is NULL. */
-            log_printf("SCAN -> All tests on %s!%s@%s complete.",
-                  ss->irc_nick, ss->irc_username, ss->irc_hostname);
-         }
+      /* Scan was a negative */
+      if (ss->positive == 0)
+        scan_negative(ss);
+    }
 
-         /* Scan was a negative */
-         if(!ss->positive)
-            scan_negative(ss);
-      }
-
-      scan_free(ss);
-   }
+    scan_free(ss);
+  }
 }
-
-
 
 /* scan_positive
  *
@@ -564,39 +484,36 @@ void scan_checkfinished(struct scan_struct *ss)
  *    tests.
  *
  * Parameters:
- *    ss: scan_struct containing information regarding positive host 
+ *    ss: scan_struct containing information regarding positive host
  *    kline: command to send to IRC server to ban the user (see scan_irckline)
  *    type: string of the type of proxy found to be running on the host
  *
  * Return: NONE
  *
  */
-
-void scan_positive(struct scan_struct *ss, char *kline, char *type)
+void
+scan_positive(struct scan_struct *ss, const char *kline, const char *type)
 {
-   node_t *node;
-   OPM_T *scanner;
+  node_t *node;
 
-   /* If already a positive, don't kline/close again */
-   if(ss->positive)
-      return;
+  /* If already a positive, don't kline/close again */
+  if (ss->positive)
+    return;
 
-   /* Format KLINE and send to IRC server */
-   scan_irckline(ss, kline, type);
+  /* Format KLINE and send to IRC server */
+  scan_irckline(ss, kline, type);
 
-   /* Speed up the cleanup procedure */
-   /* Close all scans prematurely */
-   LIST_FOREACH(node, SCANNERS->head)
-   {
-      scanner = (OPM_T *) ((struct scanner_struct *) node->data)->scanner;
-      opm_end(scanner, ss->remote);
-   }
+  /* Speed up the cleanup procedure */
+  /* Close all scans prematurely */
+  LIST_FOREACH(node, SCANNERS.head)
+  {
+    OPM_T *scanner = ((struct scanner_struct *)node->data)->scanner;
+    opm_end(scanner, ss->remote);
+  }
 
-   /* Set it as a positive (to avoid a scan_negative call later on */
-   ss->positive = 1;
+  /* Set it as a positive to avoid a scan_negative call later on */
+  ss->positive = 1;
 }
-
-
 
 /* scan_open_proxy CALLBACK
  *
@@ -607,57 +524,43 @@ void scan_positive(struct scan_struct *ss, char *kline, char *type)
  *    remote: Remote struct containing information regarding remote end
  *
  * Return: NONE
- * 
  */
-
-void scan_open_proxy(OPM_T *scanner, OPM_REMOTE_T *remote, int notused,
-      void *data)
+static void
+scan_open_proxy(OPM_T *scanner, OPM_REMOTE_T *remote, int notused, void *data)
 {
-   struct scan_struct *ss;
-   struct scanner_struct *scs;
+  struct scan_struct *ss = remote->data;
+  struct scanner_struct *scs = data;
 
-   USE_VAR(scanner);
-   USE_VAR(notused);
+  /* Record that a scan happened */
+  scan_log(remote);
 
-   /* Record that a scan happened */
-   scan_log(remote);
+  if (ss->manual_target)
+  {
+    irc_send("PRIVMSG %s :CHECK -> OPEN PROXY %s:%d (%s) [%s]",
+             ss->manual_target, remote->ip, remote->port,
+             scan_gettype(remote->protocol), scs->name);
+    log_printf("SCAN -> OPEN PROXY %s:%d (%s) [%s]", remote->ip,
+               remote->port, scan_gettype(remote->protocol), scs->name);
+  }
+  else
+  {
+    /* kline and close scan */
+    scan_positive(ss, IRCItem->kline, scan_gettype(remote->protocol));
 
-   scs = (struct scanner_struct *) data;
-   ss = (struct scan_struct *) remote->data;
+    /* Report to blacklist */
+    dnsbl_report(ss);
 
-   if(ss->manual_target == NULL)
-   {
-      /* kline and close scan */
-      scan_positive(ss, IRCItem->kline, scan_gettype(remote->protocol));
+    irc_send_channels("OPEN PROXY -> %s!%s@%s %s:%d (%s) [%s]",
+                      ss->irc_nick, ss->irc_username, ss->irc_hostname, remote->ip,
+                      remote->port, scan_gettype(remote->protocol), scs->name);
+    log_printf("SCAN -> OPEN PROXY %s!%s@%s %s:%d (%s) [%s]",
+               ss->irc_nick, ss->irc_username, ss->irc_hostname, remote->ip,
+               remote->port, scan_gettype(remote->protocol), scs->name);
+  }
 
-      /* Report to blacklist */
-      dnsbl_report(ss);
-
-      irc_send_channels("OPEN PROXY -> %s!%s@%s %s:%d (%s) [%s]",
-            ss->irc_nick, ss->irc_username, ss->irc_hostname, remote->ip,
-            remote->port, scan_gettype(remote->protocol), scs->name);
-
-      log_printf("SCAN -> OPEN PROXY %s!%s@%s %s:%d (%s) [%s]",
-            ss->irc_nick, ss->irc_username, ss->irc_hostname, remote->ip,
-            remote->port, scan_gettype(remote->protocol), scs->name);
-   }
-   else
-   {
-      irc_send("PRIVMSG %s :CHECK -> OPEN PROXY %s:%d (%s) [%s]",
-            ss->manual_target->name, remote->ip, remote->port,
-            scan_gettype(remote->protocol), scs->name);
-
-      log_printf("SCAN -> OPEN PROXY %s:%d (%s) [%s]", remote->ip,
-            remote->port, scan_gettype(remote->protocol), scs->name);
-   }
-
-
-   /* Record the proxy for stats purposes */
-   stats_openproxy(remote->protocol);
+  /* Record the proxy for stats purposes */
+  stats_openproxy(remote->protocol);
 }
-
-
-
 
 /* scan_negotiation_failed CALLBACK
  *
@@ -670,40 +573,19 @@ void scan_open_proxy(OPM_T *scanner, OPM_REMOTE_T *remote, int notused,
  * Return: NONE
  *
  */
-
-void scan_negotiation_failed(OPM_T *scanner, OPM_REMOTE_T *remote,
-      int notused, void *data)
+static void
+scan_negotiation_failed(OPM_T *scanner, OPM_REMOTE_T *remote, int notused, void *data)
 {
-   struct scan_struct *ss;
-   struct scanner_struct *scs;
+  const struct scanner_struct *scs = data;
 
-   USE_VAR(scanner);
-   USE_VAR(notused);
+  /* Record that a scan happened */
+  scan_log(remote);
 
-   /* Record that a scan happened */
-   scan_log(remote);
-
-   scs = (struct scanner_struct *) data;
-   ss = (struct scan_struct *) remote->data;
-
-   if(OPT_DEBUG)
-   {
-      log_printf("SCAN -> Negotiation failed %s:%d (%s) [%s] (%d bytes read)",
-            remote->ip, remote->port, scan_gettype(remote->protocol),
-            scs->name, remote->bytes_read);
-   }
-/*
-   if(ss->manual_target != NULL)
-   {
-      irc_send("PRIVMSG %s :CHECK -> Negotiation failed %s:%d (%s) [%s] "
-            "(%d bytes read)", ss->manual_target->name, remote->ip,
-            remote->port, scan_gettype(remote->protocol), scs->name,
-            remote->bytes_read);
-   }
-*/
+  if (OPT_DEBUG)
+    log_printf("SCAN -> Negotiation failed %s:%d (%s) [%s] (%d bytes read)",
+               remote->ip, remote->port, scan_gettype(remote->protocol), scs->name,
+               remote->bytes_read);
 }
-
-
 
 /* scan_timeout CALLBACK
  *
@@ -716,41 +598,19 @@ void scan_negotiation_failed(OPM_T *scanner, OPM_REMOTE_T *remote,
  * Return: NONE
  *
  */
-
-static void scan_timeout(OPM_T *scanner, OPM_REMOTE_T *remote, int notused,
-      void *data)
+static void
+scan_timeout(OPM_T *scanner, OPM_REMOTE_T *remote, int notused, void *data)
 {
-   struct scan_struct *ss;
-   struct scanner_struct *scs;
+  const struct scanner_struct *scs = data;
 
-   USE_VAR(scanner);
-   USE_VAR(notused);
+  /* Record that a scan happened */
+  scan_log(remote);
 
-   /* Record that a scan happened */
-   scan_log(remote);
-
-   scs = (struct scanner_struct *) data;
-   ss = (struct scan_struct *) remote->data;
-
-   if(OPT_DEBUG)
-   {
-      log_printf("SCAN -> Negotiation timed out %s:%d (%s) [%s] "
-            "(%d bytes read)", remote->ip, remote->port,
-            scan_gettype(remote->protocol), scs->name,
-            remote->bytes_read);
-   }
-/*
-   if(ss->manual_target != NULL)
-   {
-      irc_send("PRIVMSG %s :CHECK -> Negotiation timed out %s:%d (%s) [%s] "
-            "(%d bytes read)", ss->manual_target->name, remote->ip,
-            remote->port, scan_gettype(remote->protocol), scs->name,
-            remote->bytes_read);
-   }
-*/
+  if (OPT_DEBUG)
+    log_printf("SCAN -> Negotiation timed out %s:%d (%s) [%s] (%d bytes read)",
+               remote->ip, remote->port, scan_gettype(remote->protocol), scs->name,
+               remote->bytes_read);
 }
-
-
 
 /* scan_end CALLBACK
  *
@@ -762,30 +622,19 @@ static void scan_timeout(OPM_T *scanner, OPM_REMOTE_T *remote, int notused,
  *    remote: Remote struct containing information regarding remote end
  *
  * Return: NONE
- *
  */
-
-static void scan_end(OPM_T *scanner, OPM_REMOTE_T *remote, int notused,
-      void *data)
+static void
+scan_end(OPM_T *scanner, OPM_REMOTE_T *remote, int notused, void *data)
 {
-   struct scan_struct *ss;
-   struct scanner_struct *scs;
+  struct scan_struct *ss = remote->data;
+  struct scanner_struct *scs = data;
 
-   USE_VAR(scanner);
-   USE_VAR(notused);
+  if (OPT_DEBUG)
+    log_printf("SCAN -> Scan %s [%s] completed", remote->ip, scs->name);
 
-   scs = (struct scanner_struct *) data;
-   ss = (struct scan_struct *) remote->data;
-
-   if(OPT_DEBUG)
-      log_printf("SCAN -> Scan %s [%s] completed", remote->ip, scs->name);
-
-   ss->scans--;
-   scan_checkfinished(ss);
+  --ss->scans;
+  scan_checkfinished(ss);
 }
-
-
-
 
 /* scan_handle_error CALLBACK
  *
@@ -798,68 +647,54 @@ static void scan_end(OPM_T *scanner, OPM_REMOTE_T *remote, int notused,
  *    err: OPM_ERROR code describing the error.
  *
  * Return: NONE
- *
  */
-
-static void scan_handle_error(OPM_T *scanner, OPM_REMOTE_T *remote,
-      int err, void *data)
+static void
+scan_handle_error(OPM_T *scanner, OPM_REMOTE_T *remote, int err, void *data)
 {
+  struct scan_struct *ss = remote->data;
+  struct scanner_struct *scs = data;
 
-   struct scan_struct *ss;
-   struct scanner_struct *scs;
+  switch (err)
+  {
+    case OPM_ERR_MAX_READ:
+      if (OPT_DEBUG >= 2)
+        log_printf("SCAN -> Max read on %s:%d (%s) [%s] (%d bytes read)",
+                   remote->ip, remote->port, scan_gettype(remote->protocol),
+                   scs->name, remote->bytes_read);
 
-   USE_VAR(scanner);
+      if (ss->manual_target)
+        irc_send("PRIVMSG %s :CHECK -> Negotiation failed %s:%d (%s) "
+                 "[%s] (%d bytes read)", ss->manual_target,
+                 remote->ip, remote->port, scan_gettype(remote->protocol),
+                 scs->name, remote->bytes_read);
+      break;
+    case OPM_ERR_BIND:
+      log_printf("SCAN -> Bind error on %s:%d (%s) [%s]", remote->ip,
+                 remote->port, scan_gettype(remote->protocol), scs->name);
 
-   scs = (struct scanner_struct *) data;
-   ss = (struct scan_struct *) remote->data;
+      if (ss->manual_target)
+        irc_send("PRIVMSG %s :CHECK -> Bind error on %s:%d (%s) [%s]",
+                 ss->manual_target, remote->ip, remote->port,
+                 scan_gettype(remote->protocol), scs->name);
+      break;
+    case OPM_ERR_NOFD:
+      log_printf("SCAN -> File descriptor allocation error %s:%d (%s) "
+                "[%s]", remote->ip, remote->port,
+                scan_gettype(remote->protocol), scs->name);
 
-   switch(err)
-   {
-      case OPM_ERR_MAX_READ:
-         if(OPT_DEBUG >= 2)
-         {
-            log_printf("SCAN -> Max read on %s:%d (%s) [%s] (%d bytes read)",
-                  remote->ip, remote->port, scan_gettype(remote->protocol),
-                  scs->name, remote->bytes_read);
-         }
-  
-         if(ss->manual_target != NULL)
-         {
-            irc_send("PRIVMSG %s :CHECK -> Negotiation failed %s:%d (%s) "
-                  "[%s] (%d bytes read)", ss->manual_target->name,
-                  remote->ip, remote->port, scan_gettype(remote->protocol),
-                  scs->name, remote->bytes_read);
-         }
-         break;
-      case OPM_ERR_BIND:
-         log_printf("SCAN -> Bind error on %s:%d (%s) [%s]", remote->ip,
-               remote->port, scan_gettype(remote->protocol), scs->name);
-         break;
-      case OPM_ERR_NOFD:
-         log_printf("SCAN -> File descriptor allocation error %s:%d (%s) "
-               "[%s]", remote->ip, remote->port,
-               scan_gettype(remote->protocol), scs->name);
-         
-         if(ss->manual_target != NULL)
-         {
-            irc_send("PRIVMSG %s :CHECK -> Scan failed %s:%d (%s) [%s] "
-                  "(file descriptor allocation error)",
-                  ss->manual_target->name, remote->ip, remote->port,
-                  scan_gettype(remote->protocol), scs->name);
-         }
-         break;
-      default:   /* Unknown Error! */
-         if(OPT_DEBUG)
-         {
-            log_printf("SCAN -> Unknown error %s:%d (%s) [%s]", remote->ip,
-                  remote->port, scan_gettype(remote->protocol), scs->name);
-         }
-         break;
-   }
+      if (ss->manual_target)
+        irc_send("PRIVMSG %s :CHECK -> Scan failed %s:%d (%s) [%s] "
+                 "(file descriptor allocation error)",
+                 ss->manual_target, remote->ip, remote->port,
+                 scan_gettype(remote->protocol), scs->name);
+      break;
+    default:  /* Unknown Error! */
+      if (OPT_DEBUG)
+        log_printf("SCAN -> Unknown error %s:%d (%s) [%s]", remote->ip,
+                   remote->port, scan_gettype(remote->protocol), scs->name);
+      break;
+  }
 }
-
-
-
 
 /* scan_negative
  *
@@ -871,22 +706,22 @@ static void scan_handle_error(OPM_T *scanner, OPM_REMOTE_T *remote,
  * Return: NONE
  *
  */
-
-static void scan_negative(struct scan_struct *ss)
+static void
+scan_negative(const struct scan_struct *ss)
 {
-   /* Insert IP in negcache */
-   if(OptionsItem->negcache > 0)
-   {
-      if(OPT_DEBUG >= 2)
-         log_printf("SCAN -> Adding %s to negative cache", ss->ip);
-      negcache_insert(ss->ip);
-   }
-}
+  /* Insert IP in negcache */
+  if (OptionsItem->negcache)
+  {
+    if (OPT_DEBUG >= 2)
+      log_printf("SCAN -> Adding %s to negative cache", ss->ip);
 
+    negcache_insert(ss->ip);
+  }
+}
 
 /* scan_irckline
  *
- *    ss has been found as a positive host and is to be klined. 
+ *    ss has been found as a positive host and is to be klined.
  *    Format a kline message using the kline message provided
  *    as a format, then pass it to irc_send() to be sent to the remote server.
  *
@@ -894,261 +729,225 @@ static void scan_negative(struct scan_struct *ss)
  *    ss: scan_struct containing information regarding host to be klined
  *    format: kline message to format
  *    type: type of proxy found (%t format character)
- * 
- * Return: NONE
  *
+ * Return: NONE
  */
-
-static void scan_irckline(struct scan_struct *ss, char *format, char *type)
+static void
+scan_irckline(const struct scan_struct *ss, const char *format, const char *type)
 {
+  char message[MSGLENMAX] = "";  /* OUTPUT */
 
-   char message[MSGLENMAX];  /* OUTPUT */
+  unsigned int pos = 0;   /* position in format */
+  unsigned int len = 0;   /* position in message */
+  unsigned int size = 0;  /* temporary size buffer */
+  struct kline_format_assoc
+  {
+    const char key;
+    const char *data;
+  } table[] =
+  {
+    { 'i',  ss->ip           },
+    { 'h',  ss->irc_hostname },
+    { 'u',  ss->irc_username },
+    { 'n',  ss->irc_nick     },
+    { 't',  type             },
+    { '\0', NULL             }
+  };
 
-   unsigned short pos = 0;   /* position in format */
-   unsigned short len = 0;   /* position in message */
-   unsigned short size = 0;  /* temporary size buffer */
+  /*
+   * Copy format to message character by character, inserting any matching
+   * data after %.
+   */
+  while (format[pos] != '\0' && len < (MSGLENMAX - 2))
+  {
+    switch (format[pos])
+    {
+      case '%':
+        /* % is the last char in the string, move on */
+        if (format[pos + 1] == '\0')
+          continue;
 
-   unsigned int i;
+        /* %% escapes % and becomes % */
+        if (format[pos + 1] == '%')
+        {
+          message[len++] = '%';
+          ++pos;  /* Skip past the escaped % */
+          break;
+        }
 
-   struct kline_format_assoc table[] =
-      {
-         {'i',   (void *) NULL,		FORMATTYPE_STRING },
-         {'h',   (void *) NULL,     	FORMATTYPE_STRING },
-         {'u',   (void *) NULL,     	FORMATTYPE_STRING },
-         {'n',   (void *) NULL,         FORMATTYPE_STRING },
-         {'t',   (void *) NULL,		FORMATTYPE_STRING }
-      };
+        /* Safe to check against table now */
+        for (const struct kline_format_assoc *tab = table; tab->key; ++tab)
+        {
+          if (tab->key == format[pos + 1])
+          {
+            size = strlen(tab->data);
 
-   table[0].data = ss->ip;
-   table[1].data = ss->irc_hostname;
-   table[2].data = ss->irc_username;
-   table[3].data = ss->irc_nick;
-   table[4].data = type;
-
-   /*
-    * Copy format to message character by character, inserting any matching
-    * data after %.
-    */
-   while(format[pos] != '\0' && len < (MSGLENMAX - 2))
-   {
-      switch(format[pos])
-      {
-
-         case '%':
-            /* % is the last char in the string, move on */
-            if(format[pos + 1] == '\0')
-               continue;
-
-            /* %% escapes % and becomes % */
-            if(format[pos + 1] == '%')
+            /* Check if the new string can fit! */
+            if ((size + len) > (MSGLENMAX - 1))
+              break;
+            else
             {
-               message[len++] = '%';
-               pos++; /* skip past the escaped % */
-               break;
+              strlcat(message, tab->data, sizeof(message));
+              len += size;
             }
+          }
+        }
 
-            /* Safe to check against table now */
-            for(i = 0; i < (sizeof(table) / sizeof(struct kline_format_assoc)); i++)
-            {
-               if(table[i].key == format[pos + 1])
-               {
-                  switch(table[i].type)
-                  {
-                     case FORMATTYPE_STRING:
+        /* Skip key character */
+        ++pos;
+        break;
 
-                        size = strlen( (char *) table[i].data);
+        default:
+          message[len++] = format[pos];
+          message[len] = '\0';
+          break;
+    }
 
-                        /* Check if the new string can fit! */
-                        if( (size + len) > (MSGLENMAX - 1) )
-                           break;
-                        else
-                        {
-                           strcat(message, (char *) table[i].data);
-                           len += size;
-                        }
+    /* Continue to next character in format */
+    ++pos;
+  }
 
-                     default:
-                        break;
-                  }
-               }
-            }
-            /* Skip key character */
-            pos++;
-            break;
-
-         default:
-            message[len++] = format[pos];
-            message[len] = '\0';
-            break;
-      }
-      /* continue to next character in format */
-      pos++;
-   }
-   irc_send("%s", message);
+  irc_send("%s", message);
 }
-
 
 /* scan_manual
  *
  *    Create a manual scan. A manual scan is a scan where the
  *    scan_struct contains a manual_target pointer.
  */
-void scan_manual(char *param, struct ChannelConf *target)
+void
+scan_manual(char *param, const char *target)
 {
-   struct in_addr *addr;
-   struct scan_struct *ss;
-   struct scanner_struct *scs;
+  char buf[INET6_ADDRSTRLEN];
+  const void *addr = NULL;
+  const char *ip = NULL;
+  char *scannername;
+  node_t *node;
+  int ret, n;
+  struct sockaddr_storage storage;
+  socklen_t storage_len = 0;
 
-   char *ip;
-   char *scannername;
+  /* If there were no parameters sent, simply alert the user and return */
+  if (param == NULL)
+  {
+    irc_send("PRIVMSG %s :OPM -> Invalid parameters.", target);
+    return;
+  }
 
-   node_t *p;
-   int ret;
+  /*
+   * Try to extract a scanner name from param, otherwise we'll be
+   * adding to all scanners
+   */
+  ip = param;
 
-   /* If there were no parameters sent, simply alert the user and return */
-   if(param == NULL)
-   {
-      irc_send("PRIVMSG %s :OPM -> Invalid parameters.", target->name);
-      return;
-   }
+  if ((scannername = strchr(param, ' ')))
+  {
+    *scannername = '\0';
+    scannername++;
+  }
 
-   /* Try to extract a scanner name from param, otherwise we'll be
-      adding to all scanners */
-   ip = param;
+  memset(&storage, 0, sizeof(storage));
 
-   if((scannername = strchr(param, ' ')) != NULL)
-   {
-      *scannername = '\0';
-      scannername++;
-   }
+  if ((addr = firedns_resolveip6(ip)))
+  {
+    struct sockaddr_in6 *in = (struct sockaddr_in6 *)&storage;
 
-   ss = MyMalloc(sizeof *ss);
+    storage_len = sizeof(*in);
+    storage.ss_family = AF_INET6;
+    memcpy(&in->sin6_addr, addr, sizeof(in->sin6_addr));
+  }
+  else if ((addr = firedns_resolveip4(ip)))
+  {
+    struct sockaddr_in *in = (struct sockaddr_in *)&storage;
 
-   /* If IP is a hostname, resolve it using gethostbyname (which will block!) */
-   if (!(addr = firedns_resolveip4(ip)))
-   {
-       irc_send("PRIVMSG %s :CHECK -> Error resolving host '%s': %s",
-             target->name, ip, firedns_strerror(fdns_errno));
-       return;
-   }
+    storage_len = sizeof(*in);
+    storage.ss_family = AF_INET;
+    memcpy(&in->sin_addr, addr, sizeof(in->sin_addr));
+  }
+  else
+  {
+    irc_send("PRIVMSG %s :CHECK -> Error resolving host '%s': %s",
+             target, ip, firedns_strerror(firedns_errno));
+    return;
+  }
 
-   /* IP = the resolved IP now (it was the ip OR hostname before) */
-   ip = inet_ntoa(*addr);
+  if ((n = getnameinfo((const struct sockaddr *)&storage, storage_len, buf, sizeof(buf), NULL, 0, NI_NUMERICHOST)))
+  {
+    irc_send("PRIVMSG %s :CHECK -> invalid address: %s",
+             target, gai_strerror(n));
+    return;
+  }
 
-   /* These don't exist in a manual scan */
-   ss->irc_nick     = NULL;
-   ss->irc_username = NULL;
-   ss->irc_hostname = NULL;
-   ss->proof        = NULL;
+  ip = buf;
 
-   ss->ip = DupString(ip);
+  struct scan_struct *ss = xcalloc(sizeof(*ss));
+  ss->ip = xstrdup(ip);
+  ss->remote = opm_remote_create(ss->ip);
+  ss->remote->data = ss;
+  ss->manual_target = target;
 
-   ss->remote = opm_remote_create(ss->ip);
-   ss->remote->data = ss;
-   ss->scans = 0;
-   ss->positive = 0;
+  if (scannername)
+    irc_send("PRIVMSG %s :CHECK -> Checking '%s' for open proxies [%s]",
+             target, ss->ip, scannername);
+  else
+    irc_send("PRIVMSG %s :CHECK -> Checking '%s' for open proxies on all scanners",
+             target, ss->ip);
 
-   ss->manual_target = target;
+  if (LIST_SIZE(OpmItem->blacklists))
+    dnsbl_add(ss);
 
-   assert(ss->remote);
+  /* Add ss->remote to all scanners */
+  LIST_FOREACH(node, SCANNERS.head)
+  {
+    struct scanner_struct *scs = node->data;
 
-   if(scannername != NULL)
-   {
-      irc_send("PRIVMSG %s :CHECK -> Checking '%s' for open proxies [%s]", 
-                target->name, ip,  scannername);
-   }
-   else
-   {
-      irc_send("PRIVMSG %s :CHECK -> Checking '%s' for open proxies on all "
-            "scanners", target->name, ip);
-   }
+    /*
+     * If we have a scannername, only allow that scanner
+     * to be used
+     */
+    if (scannername)
+      if (strcasecmp(scannername, scs->name))
+        continue;
 
-   if(LIST_SIZE(OpmItem->blacklists) > 0)
-      dnsbl_add(ss);
+    if (OPT_DEBUG)
+      log_printf("SCAN -> Passing %s to scanner [%s] (MANUAL SCAN)", ss->ip, scs->name);
 
-   /* Add ss->remote to all scanners */
-   LIST_FOREACH(p, SCANNERS->head)
-   {
-      scs = (struct scanner_struct *) p->data;
-
-      /* If we have a scannername, only allow that scanner
-         to be used */
-      if(scannername != NULL)
-         if(strcasecmp(scannername, scs->name))
-            continue;
-
-      if(OPT_DEBUG)
+    if ((ret = opm_scan(scs->scanner, ss->remote)) != OPM_SUCCESS)
+    {
+      switch (ret)
       {
-         log_printf("SCAN -> Passing %s to scanner [%s] (MANUAL SCAN)", ip,
-               scs->name);
+        case OPM_ERR_NOPROTOCOLS:
+          break;
+        case OPM_ERR_BADADDR:
+          if (!strchr(ss->ip, ':'))  /* XXX: hack alert. remove when libopm can deal with IPv6 addresses */
+            irc_send("PRIVMSG %s :OPM -> Bad address %s [%s]",
+                     ss->manual_target, ss->ip, scs->name);
+          break;
+        default:
+          irc_send("PRIVMSG %s :OPM -> Unknown error %s [%s]",
+                   ss->manual_target, ss->ip, scs->name);
+          break;
       }
+    }
+    else
+      ++ss->scans;  /* Increase scan count only if OPM_SUCCESS */
+  }
 
-      if((ret = opm_scan(scs->scanner, ss->remote)) != OPM_SUCCESS)
-      {
-         switch(ret)
-         {
-            case OPM_ERR_NOPROTOCOLS:
-               break;
-            case OPM_ERR_BADADDR:
-               irc_send("PRIVMSG %s :OPM -> Bad address %s [%s]",
-                     ss->manual_target->name, ss->ip, scs->name);
-               break;
-            default:
-               irc_send("PRIVMSG %s :OPM -> Unknown error %s [%s]",
-                     ss->manual_target->name, ss->ip, scs->name);
-               break;
-         }
-      }
-      else
-         ss->scans++; /* Increase scan count only if OPM_SUCCESS */
-   }
+  /*
+   * If all of the scanners gave !OPM_SUCCESS and there were no dnsbl checks,
+   * cleanup here
+   */
+  if (ss->scans == 0)
+  {
+    if (scannername)
+      irc_send("PRIVMSG %s :CHECK -> No such scanner '%s', or '%s' has 0 protocols.",
+               ss->manual_target, scannername, scannername);
 
-   /* If all of the scanners gave !OPM_SUCCESS and there were no dnsbl checks, 
-      cleanup here */
-   if(ss->scans == 0)
-   {
-      if(scannername != NULL)
-      {
-         irc_send("PRIVMSG %s :CHECK -> No such scanner '%s', or '%s' has "
-               "0 protocols.", ss->manual_target->name, scannername,
-               scannername);
-      }
-
-      irc_send("PRIVMSG %s :CHECK -> No scans active on '%s', aborting scan.", 
-                ss->manual_target->name, ss->ip);
-      scan_free(ss);
-   }
+    irc_send("PRIVMSG %s :CHECK -> No scans active on '%s', aborting scan.",
+             ss->manual_target, ss->ip);
+    scan_free(ss);
+  }
 }
-
-
-
-/* scan_checkexempt
- * 
- *    Check mask against exempt list.
- * 
- * Parameters:
- *     mask: Mask to check
- * 
- * Return:
- *     1 if mask is in list
- *     0 if mask is not in list 
- */
-
-int scan_checkexempt(char *mask, char *ipmask)
-{
-   node_t *node;
-   char *exempt_mask;
-
-   LIST_FOREACH(node, ExemptItem->masks->head)
-   {
-      exempt_mask = (char *) node->data;
-      if(match(exempt_mask, mask) || match(exempt_mask, ipmask))
-         return 1;
-   }
-
-   return 0;
-}
-
 
 /* scan_log
  *
@@ -1158,22 +957,15 @@ int scan_checkexempt(char *mask, char *ipmask)
  * Parameters:
  *     remote: OPM_REMOTE_T for the remote end
  */
-
-static void scan_log(OPM_REMOTE_T *remote)
+static void
+scan_log(OPM_REMOTE_T *remote)
 {
-   char buf_present[25];
-   time_t present;
-   struct tm *tm_present;
-   struct scan_struct *ss = (struct scan_struct *) remote->data;
+  struct scan_struct *ss = remote->data;
 
-   if(!(OptionsItem->scanlog && scanlogfile))
-      return;
+  if (!(OptionsItem->scanlog && scanlogfile))
+    return;
 
-   time(&present);
-   tm_present = gmtime(&present);
-   strftime(buf_present, sizeof(buf_present), "%b %d %H:%M:%S %Y", tm_present);
-
-   fprintf(scanlogfile, "[%s] %s:%d (%s) \"%s\"\n", buf_present,
-       remote->ip, remote->port, scan_gettype(remote->protocol), ss->proof);
-   fflush(scanlogfile);
+  fprintf(scanlogfile, "[%s] %s:%d (%s) \"%s\"\n", date_iso8601(0), remote->ip,
+          remote->port, scan_gettype(remote->protocol), ss->proof);
+  fflush(scanlogfile);
 }
